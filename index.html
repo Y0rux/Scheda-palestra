@@ -138,6 +138,7 @@ nav.tabs button[aria-current="page"]{color:var(--accent)}
 .session ul{list-style:none;margin:10px 0 0;padding:0;display:flex;flex-direction:column;gap:4px;font-size:14px}
 .session li{display:flex;gap:8px;justify-content:space-between}
 .session li span:last-child{color:var(--muted);white-space:nowrap}
+.session li > span:first-child{min-width:0}
 
 .empty{text-align:center;padding:28px 16px;color:var(--muted)}
 .empty b{display:block;color:var(--ink);font-size:18px;margin-bottom:4px}
@@ -166,6 +167,22 @@ nav.tabs button[aria-current="page"]{color:var(--accent)}
 .ex-card{background:var(--surface);border-radius:20px;box-shadow:var(--shadow);padding:20px;display:flex;flex-direction:column;gap:14px}
 .ex-card h2{font-family:var(--f-display);font-weight:800;font-size:40px;line-height:.95;text-transform:uppercase;margin:0;text-wrap:balance;overflow-wrap:anywhere}
 .ex-card .note{font-size:14px;color:var(--muted)}
+.ex-card .photo{display:block;width:100%;max-width:100%;aspect-ratio:4/3;max-height:240px;object-fit:cover;border-radius:14px;border:0;padding:0;background:var(--surface-2);cursor:zoom-in}
+.ex-card .photo img{width:100%;height:100%;object-fit:cover;border-radius:14px;display:block}
+.callout{background:var(--accent-soft);border-radius:12px;padding:10px 12px;font-size:15px;font-weight:600}
+details.how{background:var(--surface-2);border-radius:12px;padding:10px 12px}
+details.how summary{font-weight:700;cursor:pointer;font-size:15px}
+details.how p{margin:8px 0 0;white-space:pre-line;font-size:15px;line-height:1.5}
+.ex-card textarea.input{font-size:15px;min-height:0}
+.thumb{width:48px;height:48px;border-radius:10px;object-fit:cover;flex:none;background:var(--surface-2)}
+.photo-edit{display:flex;flex-direction:column;gap:8px}
+.photo-edit img{width:100%;max-width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:14px;background:var(--surface-2)}
+.photo-edit .row .btn{flex:1}
+.viewer{position:fixed;inset:0;z-index:70;background:rgba(5,6,8,.94);display:grid;place-items:center;
+  padding-left:max(12px,env(safe-area-inset-left,0px));padding-right:max(12px,env(safe-area-inset-right,0px));padding-block:calc(12px + env(safe-area-inset-top,0px)) calc(12px + env(safe-area-inset-bottom,0px))}
+.viewer img{max-width:100%;max-height:100%;border-radius:10px;object-fit:contain}
+.session .snote{margin-top:8px;font-size:14px;white-space:pre-line;color:var(--ink);background:var(--surface-2);border-radius:10px;padding:8px 10px}
+.session li small{display:block;color:var(--muted);white-space:normal;font-size:13px}
 .bigs{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:10px}
 .big{background:var(--surface-2);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:2px;min-width:0}
 .big small{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
@@ -269,11 +286,57 @@ function save(k) { lsSet(k, S[k]); }
 function syncHTML() {
   return `<button class="iconbtn" data-act="backup" aria-label="Backup dei dati"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg></button>`;
 }
-function exportData() {
-  const data = {app:'scheda-palestra', version:1, exportedAt:new Date().toISOString(), exercises:S.exercises, routines:S.routines, history:S.history};
-  const blob = new Blob([JSON.stringify(data, null, 1)], {type:'application/json'});
+/* Photos live in IndexedDB (too big for localStorage); exercises carry photo:true. */
+const photoDB = (() => {
+  let p;
+  const open = () => p ||= new Promise((res, rej) => {
+    const r = indexedDB.open('scheda', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('photos');
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  });
+  const tx = (mode, fn) => open().then(db => new Promise((res, rej) => {
+    const t = db.transaction('photos', mode); const req = fn(t.objectStore('photos'));
+    t.oncomplete = () => res(req && req.result); t.onerror = () => rej(t.error);
+  }));
+  return { get:k => tx('readonly', st => st.get(k)), set:(k, v) => tx('readwrite', st => st.put(v, k)), del:k => tx('readwrite', st => st.delete(k)) };
+})();
+const photoURL = {};
+async function loadPhotos() {
+  for (const e of S.exercises) {
+    if (!e.photo || photoURL[e.id]) continue;
+    try { const b = await photoDB.get(e.id); if (b) photoURL[e.id] = URL.createObjectURL(b); else delete e.photo; } catch {}
+  }
+  render();
+}
+async function setPhoto(id, blob) {
+  if (photoURL[id]) { URL.revokeObjectURL(photoURL[id]); delete photoURL[id]; }
+  if (blob) { await photoDB.set(id, blob); photoURL[id] = URL.createObjectURL(blob); }
+  else await photoDB.del(id);
+}
+function shrinkImage(file, max = 1280) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const c = document.createElement('canvas'); c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url);
+      c.toBlob(b => b ? res(b) : rej(new Error('blob')), 'image/jpeg', 0.8);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('img')); };
+    img.src = url;
+  });
+}
+const blobToDataURL = b => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(b); });
+async function prepareBackup() {
+  const photos = {};
+  for (const e of S.exercises) if (e.photo) { try { const b = await photoDB.get(e.id); if (b) photos[e.id] = await blobToDataURL(b); } catch {} }
+  const data = {app:'scheda-palestra', version:2, exportedAt:new Date().toISOString(), exercises:S.exercises, routines:S.routines, history:S.history, photos};
   const name = 'scheda-palestra-' + new Date().toISOString().slice(0, 10) + '.json';
-  const file = new File([blob], name, {type:'application/json'});
+  return new File([JSON.stringify(data)], name, {type:'application/json'});
+}
+function exportData(file) {
+  if (!file) return;
+  const blob = file, name = file.name;
   if (navigator.canShare && navigator.canShare({files:[file]})) {
     navigator.share({files:[file], title:'Backup Scheda Palestra'}).catch(() => {});
   } else {
@@ -288,6 +351,11 @@ function importData(file) {
       const d = JSON.parse(fr.result);
       if (d.app !== 'scheda-palestra' || !KEYS.every(k => Array.isArray(d[k]))) throw 0;
       KEYS.forEach(k => { S[k] = d[k]; save(k); });
+      const ph = d.photos || {};
+      Promise.all(S.exercises.map(async e => {
+        if (ph[e.id]) { try { await setPhoto(e.id, await (await fetch(ph[e.id])).blob()); e.photo = true; } catch { delete e.photo; } }
+        else { delete e.photo; try { await setPhoto(e.id, null); } catch {} }
+      })).then(() => { save('exercises'); render(); });
       toast('Backup ripristinato'); closeSheet();
     } catch { toast('File non valido: scegli un backup di Scheda Palestra'); }
   };
@@ -358,11 +426,13 @@ function editorHTML() {
           <button data-act="rm-item" aria-label="Rimuovi">${ICON.x}</button>
         </div>
       </div>
-      <div class="grid ${w ? '' : 'three'}">
+      <div class="stack" style="gap:10px"><div class="grid ${w ? '' : 'three'}">
         <div class="field"><label for="s-${it.id}">Serie</label><input class="input num" id="s-${it.id}" data-f="sets" type="number" inputmode="numeric" min="1" max="20" value="${esc(it.sets)}"></div>
         <div class="field"><label for="r-${it.id}">${cardio ? 'Minuti' : 'Ripetiz.'}</label><input class="input num" id="r-${it.id}" data-f="reps" type="text" inputmode="text" maxlength="8" value="${esc(it.reps)}" placeholder="${cardio ? '20' : '10'}"></div>
         <div class="field"><label for="p-${it.id}">Recupero s</label><input class="input num" id="p-${it.id}" data-f="rest" type="number" inputmode="numeric" min="0" step="15" value="${esc(it.rest)}"></div>
         ${w ? `<div class="field"><label for="w-${it.id}">Peso kg</label><input class="input num" id="w-${it.id}" data-f="weight" type="number" inputmode="decimal" min="0" step="0.5" value="${esc(it.weight)}"></div>` : ''}
+      </div>
+      <div class="field"><label for="n-${it.id}">Nota per questa scheda</label><input class="input" id="n-${it.id}" data-f="note" type="text" maxlength="160" value="${esc(it.note)}" placeholder="Es. ultima serie a cedimento, fermo 2 s in basso"></div>
       </div></div>`;
   }).join('');
   const armed = ui.armed === 'del-' + r.id;
@@ -396,7 +466,7 @@ function groupedList(list, act, addedIds) {
   return keys.map(g => `<section class="group"><h3>${esc(g)}</h3><div class="list">${
     groups[g].sort((a, b) => a.name.localeCompare(b.name, 'it')).map(e => {
       const n = addedIds ? addedIds.filter(x => x === e.id).length : 0;
-      return `<button class="li" data-act="${act}" data-id="${e.id}"><span class="grow"><span class="nm">${esc(e.name)}</span><br><span class="tag t-${e.type}">${TYPES[e.type].label}</span></span>${n ? `<span class="added">Aggiunto${n > 1 ? ' ×' + n : ''}</span>` : ''}</button>`;
+      return `<button class="li" data-act="${act}" data-id="${e.id}">${photoURL[e.id] ? `<img class="thumb" src="${photoURL[e.id]}" alt="">` : ''}<span class="grow"><span class="nm">${esc(e.name)}</span><br><span class="tag t-${e.type}">${TYPES[e.type].label}</span></span>${n ? `<span class="added">Aggiunto${n > 1 ? ' ×' + n : ''}</span>` : ''}</button>`;
     }).join('')}</div></section>`).join('');
 }
 function exercisesHTML() {
@@ -420,7 +490,8 @@ function historyHTML() {
       <div class="row"><div class="grow"><div class="eyebrow num">${d.toLocaleDateString('it-IT', {weekday:'long', day:'numeric', month:'long'})} · ${d.toLocaleTimeString('it-IT', {hour:'2-digit', minute:'2-digit'})}</div><h4>${esc(h.name)}</h4></div>
       <button class="btn danger small ${armed ? 'armed' : ''}" style="min-height:36px;padding:6px 10px" data-act="del-h" data-id="${h.id}">${armed ? 'Conferma' : 'Elimina'}</button></div>
       <div class="meta small muted num" style="margin-top:4px">${mmss(h.duration)} min · ${fmtKg(sessionVolume(h))} kg totali</div>
-      <ul>${h.items.map(it => `<li class="num"><span>${esc(it.name)}</span><span>${it.done}/${it.sets} × ${esc(it.reps)}${it.weight ? ' · ' + fmtKg(+it.weight) + ' kg' : ''}</span></li>`).join('')}</ul>
+      <ul>${h.items.map(it => `<li class="num"><span>${esc(it.name)}${it.note ? `<small>${esc(it.note)}</small>` : ''}</span><span>${it.done}/${it.sets} × ${esc(it.reps)}${it.weight ? ' · ' + fmtKg(+it.weight) + ' kg' : ''}</span></li>`).join('')}</ul>
+      ${h.note ? `<div class="snote">${esc(h.note)}</div>` : ''}
     </article>`;
   }).join('');
   return header('Storico') + `<div class="stack">
@@ -449,7 +520,7 @@ function renderSheet() {
   } else if (c.kind === 'backup') {
     title = 'Backup';
     body = `<p class="small muted" style="margin:0">Schede, esercizi e storico restano solo su questo telefono. Ogni tanto salva un backup (per esempio su iCloud Drive o Google Drive): ti serve se cambi telefono o cancelli i dati del browser.</p>
-      <button class="btn primary block" data-act="export">Salva backup</button>
+      <button class="btn primary block" data-act="export" ${c.file ? '' : 'disabled'}>${c.file ? 'Salva backup' : 'Preparazione backup…'}</button>
       <label class="btn ghost block" for="impfile">Ripristina da backup</label>
       <input id="impfile" type="file" accept="application/json,.json" hidden>
       <p class="small muted" style="margin:0">Il ripristino sostituisce i dati attuali con quelli del file.</p>`;
@@ -461,7 +532,13 @@ function renderSheet() {
     body = `<div class="field"><label for="exn">Nome</label><input class="input" id="exn" data-d="name" value="${esc(e.name)}" placeholder="Es. Pectoral machine"></div>
       <div class="field"><label for="ext">Tipo</label><select class="input" id="ext" data-d="type">${Object.entries(TYPES).map(([k, t]) => `<option value="${k}" ${e.type === k ? 'selected' : ''}>${t.label}</option>`).join('')}</select></div>
       <div class="field"><label for="exm">Gruppo muscolare</label><input class="input" id="exm" data-d="muscle" list="muscles" value="${esc(e.muscle)}" placeholder="Es. Petto"><datalist id="muscles">${muscles.map(m => `<option value="${esc(m)}">`).join('')}</datalist></div>
-      <div class="field"><label for="exo">Note (regolazioni, sedile, impugnatura)</label><textarea class="input" id="exo" data-d="notes" rows="2" placeholder="Es. sedile al 4, schienale 2">${esc(e.notes)}</textarea></div>
+      <div class="photo-edit"><span class="eyebrow">Foto</span>
+        ${c.preview ? `<img src="${c.preview}" alt="Foto di ${esc(e.name)}">` : ''}
+        <div class="row"><label class="btn ghost" for="exphoto">${c.busy ? 'Caricamento…' : c.preview ? 'Cambia foto' : 'Scatta o scegli una foto'}</label>${c.preview ? '<button class="btn ghost" data-act="rm-photo">Rimuovi</button>' : ''}</div>
+        <input id="exphoto" type="file" accept="image/*" hidden>
+      </div>
+      <div class="field"><label for="exo">Regolazioni (sedile, impugnatura)</label><textarea class="input" id="exo" data-d="notes" rows="2" placeholder="Es. sedile al 4, schienale 2">${esc(e.notes)}</textarea></div>
+      <div class="field"><label for="exh">Come si esegue</label><textarea class="input" id="exh" data-d="how" rows="4" placeholder="Es. scapole addotte, scendi lento in 3 secondi, gomiti a 45°, non bloccare in alto">${esc(e.how)}</textarea></div>
       <button class="btn primary block" data-act="save-ex">Salva</button>
       ${c.id ? `<button class="btn danger block ${ui.armed === 'ex' ? 'armed' : ''}" data-act="del-ex">${ui.armed === 'ex' ? (used ? `Elimina (verrà tolto da ${used} ${used > 1 ? 'schede' : 'scheda'})` : 'Tocca per confermare') : 'Elimina esercizio'}</button>` : ''}`;
   }
@@ -477,7 +554,7 @@ function saveRun() { if (run) lsSet('run', run); else { try { localStorage.remov
 function startRun(r) {
   run = {routineId:r.id, name:r.name || 'Allenamento', startedAt:Date.now(), idx:0, restEnd:null, restTotal:0, confirm:false, finished:false, updateW:true,
     items:r.items.map(it => { const ex = exById(it.exId) || {name:'Esercizio', type:'corpo', notes:''};
-      return {itemId:it.id, name:ex.name, type:ex.type, notes:ex.notes || '', sets:Math.max(1, +it.sets || 1), reps:it.reps || '', rest:+it.rest || 0, weight:hasWeight(ex.type) ? (it.weight === '' ? '' : +it.weight || 0) : '', origW:it.weight, done:0}; })};
+      return {itemId:it.id, exId:it.exId, name:ex.name, type:ex.type, notes:ex.notes || '', how:ex.how || '', note:it.note || '', today:'', sets:Math.max(1, +it.sets || 1), reps:it.reps || '', rest:+it.rest || 0, weight:hasWeight(ex.type) ? (it.weight === '' ? '' : +it.weight || 0) : '', origW:it.weight, done:0}; })};
   saveRun(); requestWake(); renderRun();
 }
 function requestWake() { try { navigator.wakeLock?.request('screen').then(w => wake = w).catch(() => {}); } catch {} }
@@ -538,7 +615,10 @@ function renderRun() {
     <section class="ex-card">
       <div class="row"><span class="tag t-${it.type}">${TYPES[it.type] ? TYPES[it.type].label : ''}</span><span class="grow"></span><span class="eyebrow num">Esercizio ${run.idx + 1}/${run.items.length}</span></div>
       <h2>${esc(it.name)}</h2>
-      ${it.notes ? `<div class="note">${esc(it.notes)}</div>` : ''}
+      ${photoURL[it.exId] ? `<button class="photo" data-act="zoom" data-id="${it.exId}" aria-label="Ingrandisci la foto"><img src="${photoURL[it.exId]}" alt=""></button>` : ''}
+      ${it.note ? `<div class="callout">${esc(it.note)}</div>` : ''}
+      ${it.notes ? `<div class="note">Regolazioni: ${esc(it.notes)}</div>` : ''}
+      ${it.how ? `<details class="how" data-k="how" ${run.open_how ? 'open' : ''}><summary>Come si esegue</summary><p>${esc(it.how)}</p></details>` : ''}
       <div class="bigs">
         <div class="big"><small>${it.type === 'cardio' ? 'Durata' : 'Ripetizioni'}</small><b class="num">${esc(it.reps || '–')}${it.type === 'cardio' && /^\d+$/.test(it.reps) ? '<em>min</em>' : ''}</b></div>
         ${w ? `<div class="big"><small>Peso kg</small><div class="wt"><button data-act="w" data-d="-2.5" aria-label="Meno 2,5 kg">−</button><input id="runw" class="num" type="number" inputmode="decimal" step="0.5" min="0" value="${esc(it.weight)}" aria-label="Peso in kg"><button data-act="w" data-d="2.5" aria-label="Più 2,5 kg">+</button></div></div>`
@@ -546,6 +626,7 @@ function renderRun() {
       </div>
       <div><div class="eyebrow" style="margin-bottom:8px">Serie ${setNo} di ${it.sets}${w ? ' · recupero ' + esc(restLabel(it.rest)) : ''}</div>
       <div class="sets num">${Array.from({length:it.sets}, (_, i) => `<span class="${i < it.done ? 'done' : i === it.done ? 'cur' : ''}">${i + 1}</span>`).join('')}</div></div>
+      <details class="how" data-k="today" ${run.open_today || it.today ? 'open' : ''}><summary>Nota di oggi</summary><textarea class="input" id="runexnote" rows="2" style="margin-top:8px" placeholder="Es. spalla tirava sull'ultima serie, la prossima volta +2,5 kg">${esc(it.today)}</textarea></details>
     </section>
     <button class="btn primary block go" data-act="set-done">${it.done >= it.sets ? 'Esercizio completato' : 'Serie fatta'}</button>
     <div class="navrow"><button class="btn ghost" data-act="ex-prev" ${run.idx === 0 ? 'disabled' : ''}>${ICON.back} Precedente</button><button class="btn ghost" data-act="ex-next" ${run.idx === run.items.length - 1 ? 'disabled' : ''}>Salta esercizio</button></div>
@@ -580,6 +661,7 @@ function finishHTML() {
     <div class="stats num"><div class="stat"><b>${mmss(dur)}</b><span>Durata</span></div><div class="stat"><b>${done}/${tot}</b><span>Serie</span></div><div class="stat"><b>${fmtKg(Math.round(sessionVolume({items:run.items})))}</b><span>Kg totali</span></div></div>
     <div class="card session"><ul style="margin:0">${run.items.map(it => `<li class="num"><span>${esc(it.name)}</span><span>${it.done}/${it.sets} × ${esc(it.reps)}${it.weight !== '' ? ' · ' + fmtKg(+it.weight) + ' kg' : ''}</span></li>`).join('')}</ul></div>
     ${changed ? `<label class="check"><input type="checkbox" id="updw" ${run.updateW ? 'checked' : ''}><span>Aggiorna nella scheda i pesi che hai cambiato oggi</span></label>` : ''}
+    <div class="field"><label for="runnote">Note sull'allenamento</label><textarea class="input" id="runnote" rows="3" placeholder="Es. poco sonno, energia bassa. Panca ottima.">${esc(run.note || '')}</textarea></div>
     <button class="btn primary block go" data-act="save-run">Salva nello storico</button>
     <div class="navrow"><button class="btn ghost" data-act="back-run">Torna all'allenamento</button><button class="btn danger" data-act="discard-run">Non salvare</button></div>
   </div></div>`;
@@ -627,22 +709,30 @@ document.addEventListener('click', e => {
     }
     case 'filter': ui.filter = b.dataset.v; if (sheetCtx) renderSheet(); else render(); break;
     case 'new-ex': openSheet({kind:'ex', id:null, draft:{name:ui.q, type:'macchinario', muscle:'', notes:''}}); setTimeout(() => document.getElementById('exn')?.focus(), 50); break;
-    case 'open-ex': { const ex = exById(id); openSheet({kind:'ex', id, draft:{...ex}}); break; }
+    case 'open-ex': { const ex = exById(id); openSheet({kind:'ex', id, draft:{...ex}, preview:photoURL[id] || null}); break; }
+    case 'rm-photo': sheetCtx.photo = null; sheetCtx.preview = null; renderSheet(); break;
     case 'save-ex': {
-      const d = sheetCtx.draft; d.name = (d.name || '').trim();
+      const c = sheetCtx, d = c.draft; d.name = (d.name || '').trim();
       if (!d.name) { toast('Scrivi il nome dell\'esercizio'); document.getElementById('exn')?.focus(); break; }
-      if (sheetCtx.id) Object.assign(exById(sheetCtx.id), d); else S.exercises.push({id:uid(), ...d});
-      save('exercises'); toast(sheetCtx.id ? 'Esercizio aggiornato' : 'Esercizio creato'); closeSheet(); break;
+      if (c.busy) { toast('Attendi il caricamento della foto'); break; }
+      const xid = c.id || uid();
+      if (c.photo !== undefined) {
+        if (c.photo) d.photo = true; else delete d.photo;
+        setPhoto(xid, c.photo).then(render).catch(() => toast('Foto non salvata: memoria del telefono piena?'));
+      }
+      if (c.id) { const ex = exById(c.id); Object.keys(ex).forEach(k => k !== 'id' && delete ex[k]); Object.assign(ex, d, {id:c.id}); }
+      else S.exercises.push({...d, id:xid});
+      save('exercises'); toast(c.id ? 'Esercizio aggiornato' : 'Esercizio creato'); closeSheet(); break;
     }
     case 'del-ex':
       if (ui.armed === 'ex') {
-        const xid = sheetCtx.id; S.exercises = S.exercises.filter(x => x.id !== xid);
+        const xid = sheetCtx.id; S.exercises = S.exercises.filter(x => x.id !== xid); setPhoto(xid, null).catch(() => {});
         S.routines.forEach(rr => rr.items = rr.items.filter(it => it.exId !== xid));
         save('exercises'); save('routines'); ui.armed = null; toast('Esercizio eliminato'); closeSheet();
       } else { ui.armed = 'ex'; renderSheet(); }
       break;
-    case 'backup': openSheet({kind:'backup'}); break;
-    case 'export': exportData(); break;
+    case 'backup': { const c = {kind:'backup', file:null}; openSheet(c); prepareBackup().then(f => { c.file = f; if (sheetCtx === c) renderSheet(); }); break; }
+    case 'export': exportData(sheetCtx && sheetCtx.file); break;
     case 'scrim': case 'close-sheet': closeSheet(); break;
     case 'del-h':
       if (ui.armed === 'h-' + id) { S.history = S.history.filter(h => h.id !== id); save('history'); ui.armed = null; }
@@ -653,6 +743,7 @@ document.addEventListener('click', e => {
     case 'w': { const it = run.items[run.idx]; it.weight = Math.max(0, Math.round(((+it.weight || 0) + (+b.dataset.d)) * 100) / 100); saveRun(); const inp = document.getElementById('runw'); if (inp) inp.value = it.weight; break; }
     case 'rest-add': run.restEnd += (+b.dataset.d) * 1000; run.restTotal = Math.max(run.restTotal, (run.restEnd - Date.now()) / 1000); if (run.restEnd <= Date.now()) endRest(); else saveRun(); break;
     case 'rest-skip': endRest(); break;
+    case 'zoom': { const v = document.createElement('div'); v.className = 'viewer'; v.setAttribute('role', 'dialog'); v.setAttribute('aria-label', 'Foto'); v.innerHTML = `<img src="${photoURL[id]}" alt="">`; v.addEventListener('click', () => v.remove()); document.body.appendChild(v); break; }
     case 'ex-prev': run.idx = Math.max(0, run.idx - 1); saveRun(); renderRun(); break;
     case 'ex-next': run.idx = Math.min(run.items.length - 1, run.idx + 1); saveRun(); renderRun(); break;
     case 'end': if (run.confirm) { run.confirm = false; run.finished = true; run.restEnd = null; } else run.confirm = true; saveRun(); renderRun(); break;
@@ -660,8 +751,8 @@ document.addEventListener('click', e => {
     case 'discard-run': closeRun(); toast('Allenamento non salvato'); break;
     case 'save-run': {
       const upd = document.getElementById('updw')?.checked;
-      S.history.push({id:uid(), date:new Date(run.startedAt).toISOString(), name:run.name, duration:Math.round((Date.now() - run.startedAt) / 1000),
-        items:run.items.map(it => ({name:it.name, type:it.type, sets:it.sets, done:it.done, reps:it.reps, weight:it.weight}))});
+      S.history.push({id:uid(), date:new Date(run.startedAt).toISOString(), name:run.name, duration:Math.round((Date.now() - run.startedAt) / 1000), note:(run.note || '').trim(),
+        items:run.items.map(it => ({name:it.name, type:it.type, sets:it.sets, done:it.done, reps:it.reps, weight:it.weight, note:(it.today || '').trim()}))});
       save('history');
       if (upd) { const rt = S.routines.find(x => x.id === run.routineId); if (rt) { run.items.forEach(it => { const ri = rt.items.find(x => x.id === it.itemId); if (ri && it.weight !== '') ri.weight = it.weight; }); save('routines'); } }
       ui.tab = 'history'; ui.edit = null; closeRun(); toast('Allenamento salvato'); break;
@@ -674,7 +765,7 @@ document.addEventListener('input', e => {
   if (t.matches('[data-rname]')) { const r = S.routines.find(x => x.id === ui.edit); r.name = t.value; delete r.example; save('routines'); return; }
   if (t.matches('[data-f]')) {
     const r = S.routines.find(x => x.id === ui.edit); const it = r.items.find(x => x.id === t.closest('[data-item]').dataset.item);
-    const f = t.dataset.f; it[f] = f === 'reps' ? t.value : (t.value === '' ? '' : +t.value); delete r.example; save('routines'); return;
+    const f = t.dataset.f; it[f] = (f === 'reps' || f === 'note') ? t.value : (t.value === '' ? '' : +t.value); delete r.example; save('routines'); return;
   }
   if (t.id === 'exq' || t.id === 'pkq') {
     ui.q = t.value;
@@ -685,11 +776,22 @@ document.addEventListener('input', e => {
   if (t.matches('[data-d]') && sheetCtx && sheetCtx.kind === 'ex') { sheetCtx.draft[t.dataset.d] = t.value; return; }
   if (t.id === 'runw' && run) { run.items[run.idx].weight = t.value === '' ? 0 : +t.value; saveRun(); return; }
   if (t.id === 'updw' && run) { run.updateW = t.checked; saveRun(); }
+  if (t.id === 'runnote' && run) { run.note = t.value; saveRun(); }
+  if (t.id === 'runexnote' && run) { run.items[run.idx].today = t.value; saveRun(); }
 });
-document.addEventListener('change', e => { if (e.target.id === 'impfile' && e.target.files[0]) importData(e.target.files[0]); if (e.target.id === 'ext' && sheetCtx) sheetCtx.draft.type = e.target.value; });
+document.addEventListener('change', e => {
+  if (e.target.id === 'exphoto' && e.target.files[0] && sheetCtx) {
+    const c = sheetCtx; c.busy = true; renderSheet();
+    shrinkImage(e.target.files[0]).then(b => { c.photo = b; c.preview = URL.createObjectURL(b); })
+      .catch(() => toast('Non riesco a leggere questa foto: provane un\'altra'))
+      .finally(() => { c.busy = false; if (sheetCtx === c) renderSheet(); });
+  }
+  if (e.target.id === 'impfile' && e.target.files[0]) importData(e.target.files[0]); if (e.target.id === 'ext' && sheetCtx) sheetCtx.draft.type = e.target.value; });
+document.addEventListener('toggle', e => { const d = e.target; if (run && d.matches && d.matches('details[data-k]')) run['open_' + d.dataset.k] = d.open; }, true);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && run && run.open) requestWake(); });
 
 render();
+loadPhotos();
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 })();
 </script>
